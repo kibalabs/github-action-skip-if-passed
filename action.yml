@@ -1,0 +1,24 @@
+name: 'Skip If Passed'
+description: 'Skip the rest of a job when the files it checks already passed on an earlier commit'
+branding:
+  icon: 'fast-forward'
+  color: 'green'
+author: 'Kiba Labs'
+inputs:
+  github-token:
+    description: 'Token used to read workflow runs, commits and the workflow file, and to copy check runs. Needs actions: read, contents: read and checks: write.'
+    required: false
+    default: ${{ github.token }}
+  paths:
+    description: 'Path patterns this job checks, one per line, in GitHub''s paths filter syntax. Defaults to the paths or paths-ignore filter of the event that triggered the workflow.'
+    required: false
+outputs:
+  should-skip:
+    description: 'true when the rest of the job can be skipped, otherwise false'
+  reason:
+    description: 'Why the job is or is not skipped'
+  passed-run-url:
+    description: 'URL of the earlier run that passed on the same files, when skipping'
+runs:
+  using: 'node24'
+  main: 'runnable/index.js'
