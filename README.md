@@ -39,6 +39,8 @@ The job is skipped when an earlier run of the same workflow for the same event *
 
 A run that failed, was cancelled or timed out never counts, so a failing check runs again on the next push. Only `push` and `pull_request` events can be skipped; every other event always runs.
 
+The files a job checks come from the `paths` or `paths-ignore` filter of the event that triggered the workflow, read from the workflow file itself, so they are only written once. Patterns follow GitHub's [filter pattern cheat sheet](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#filter-pattern-cheat-sheet), including `!` exclusions. Without a filter, the job is only skipped when the files are exactly the same as a run that passed.
+
 For pull requests, it compares the PR's files, not the merge with the base branch, so a PR whose files already passed is skipped even if the base branch moved since (as with other tree-based skip tools).
 
 It looks back at most 50 commits and 500 workflow runs. If the history can't be read, the job runs as normal and the action logs a warning.
