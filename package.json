@@ -1,6 +1,6 @@
 {
   "name": "@kibalabs/github-action-skip-if-passed",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "GitHub Action to skip a job when the files it checks already passed on an earlier commit",
   "license": "MIT",
   "private": true,

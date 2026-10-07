@@ -32,14 +32,14 @@ When the job is skipped, the action sets `CHECKS_ALREADY_PASSED=true` for the re
 
 ## When it skips
 
-The job is skipped when an earlier run of the same workflow **succeeded** and either:
+The job is skipped when an earlier run of the same workflow for the same event **succeeded**, the same job also concluded `success`, and either:
 
 - it ran on exactly the same files (same git tree), or
 - no commit since then changed a file this job checks.
 
-A run that failed, was cancelled or timed out never counts, so a failing check runs again on the next push. `workflow_dispatch`, `schedule` and `merge_group` runs are never skipped.
+A run that failed, was cancelled or timed out never counts, so a failing check runs again on the next push. Only `push` and `pull_request` events can be skipped; every other event always runs.
 
-The files a job checks come from the `paths` or `paths-ignore` filter of the event that triggered the workflow, read from the workflow file itself, so they are only written once. Patterns follow GitHub's [filter pattern cheat sheet](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#filter-pattern-cheat-sheet), including `!` exclusions. Without a filter, the job is only skipped when the files are exactly the same as a run that passed.
+For pull requests, it compares the PR's files, not the merge with the base branch, so a PR whose files already passed is skipped even if the base branch moved since (as with other tree-based skip tools).
 
 It looks back at most 50 commits and 500 workflow runs. If the history can't be read, the job runs as normal and the action logs a warning.
 
@@ -66,4 +66,4 @@ A skipped run doesn't produce its own checks, so the action copies them from the
 
 Build with `make build`, which bundles `src/` into `runnable/index.js`. GitHub runs that file directly, so commit it with every source change. Run the tests with `make test`.
 
-To release, push a `vX.Y.Z` tag. The release workflow publishes the release and moves the `vX` tag to it, so `@v1` always points at the latest 1.x release.
+To release, bump `version` in `package.json` in a PR, then run the Release workflow on `main` (Actions → Release → Run workflow). It tags `vX.Y.Z`, publishes the release and moves the `vX` tag to it, so `@v1` always points at the latest 1.x release. Versions with a pre-release suffix (e.g. `1.1.0-rc1`) are published as pre-releases and don't move `vX`. Only the release workflow can push version tags.

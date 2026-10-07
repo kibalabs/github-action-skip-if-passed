@@ -2,7 +2,7 @@ import { exportVariable, getInput, getMultilineInput, summary as jobSummary, inf
 import { getOctokit, context as githubContext } from '@actions/github';
 
 import { copyCheckRuns } from './copy-checks';
-import { findPassedRun, getCommit, getFileContent, getWorkflowRun, Octokit } from './github-api';
+import { findPassedRun, getCommit, getCurrentJobName, getFileContent, getWorkflowRun, Octokit } from './github-api';
 import { IPathFilter, SKIP_ENVIRONMENT_VARIABLE } from './model';
 import { readTriggerPathFilter } from './path-filter';
 import { decideSkip } from './skip-decision';
@@ -30,8 +30,9 @@ const run = async (): Promise<void> => {
     const decision = await decideSkip({
       currentRun,
       pathFilter,
+      getCurrentJobName: () => getCurrentJobName(octokit, owner, repo, currentRun, githubContext.runAttempt, process.env.RUNNER_NAME),
       getCommit: (sha: string) => getCommit(octokit, owner, repo, sha),
-      findPassedRun: (treeHashes: string[], sinceDate: Date) => findPassedRun(octokit, owner, repo, currentRun, treeHashes, sinceDate),
+      findPassedRun: (treeHashes: string[], sinceDate: Date, jobName: string) => findPassedRun(octokit, owner, repo, currentRun, treeHashes, sinceDate, jobName),
     });
     setOutput('reason', decision.reason);
     if (!decision.passedRun) {
@@ -40,8 +41,6 @@ const run = async (): Promise<void> => {
       return;
     }
     notice(`Skipping: ${decision.reason}`, { title: 'Skipped' });
-    exportVariable(SKIP_ENVIRONMENT_VARIABLE, 'true');
-    setOutput('should-skip', 'true');
     setOutput('passed-run-url', decision.passedRun.url);
     let copiedNames: string[] = [];
     try {
@@ -50,6 +49,8 @@ const run = async (): Promise<void> => {
       warning(`Could not copy the checks of the passed run: ${error instanceof Error ? error.message : String(error)}`, { title: 'Checks not copied' });
     }
     await jobSummary.addRaw(`Skipped: ${decision.reason}.${copiedNames.length > 0 ? ` Copied checks: ${copiedNames.join(', ')}.` : ''}`, true).write();
+    exportVariable(SKIP_ENVIRONMENT_VARIABLE, 'true');
+    setOutput('should-skip', 'true');
   } catch (error) {
     // NOTE(krishan711): when the history can't be read the job runs as normal, a needless run is better than a wrongly skipped one
     warning(`Could not check earlier runs, so not skipping: ${error instanceof Error ? error.message : String(error)}`, { title: 'Skip check failed' });

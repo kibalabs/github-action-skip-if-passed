@@ -1,11 +1,12 @@
 export const SKIP_ENVIRONMENT_VARIABLE = 'CHECKS_ALREADY_PASSED';
 
-export const NEVER_SKIPPED_EVENTS = ['workflow_dispatch', 'schedule', 'merge_group'];
+export const SKIPPABLE_EVENTS: readonly string[] = ['push', 'pull_request'];
 
 export interface IWorkflowRun {
   id: number;
   event: string;
   workflowId: number;
+  runAttempt: number | null;
   createdDate: Date;
   headSha: string;
   treeHash: string | null;

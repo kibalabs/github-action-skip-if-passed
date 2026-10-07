@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ICommit, IPathFilter, IWorkflowRun } from '../src/model';
+import { ICommit, IPathFilter, ISkipDecision, IWorkflowRun } from '../src/model';
 import { decideSkip, isEarlierPassedRun, MAX_COMMITS_TO_CHECK } from '../src/skip-decision';
 
 const API_FILTER: IPathFilter = { type: 'paths', patterns: ['api/**'] };
@@ -10,6 +10,7 @@ const buildRun = (id: number, treeHash: string, conclusion: string | null, overr
   id,
   event: 'pull_request',
   workflowId: 1,
+  runAttempt: 1,
   createdDate: new Date(id * HOUR_MS),
   headSha: `sha${id}`,
   treeHash,
@@ -48,19 +49,21 @@ const buildHistory = (commits: ITestCommit[]): ((sha: string) => Promise<ICommit
 const currentRun = buildRun(10, 't0', null, { headSha: 'c0' });
 const searches: { treeHashes: string[]; sinceDate: Date }[] = [];
 
-const decide = async (commits: ITestCommit[], olderRuns: IWorkflowRun[], pathFilter: IPathFilter | null, run: IWorkflowRun = currentRun): Promise<IWorkflowRun | null> => {
+const makeDecision = async (commits: ITestCommit[], olderRuns: IWorkflowRun[], pathFilter: IPathFilter | null, run: IWorkflowRun = currentRun, currentJobName: string | null = 'api-check'): Promise<ISkipDecision> => {
   searches.length = 0;
-  const decision = await decideSkip({
+  return decideSkip({
     currentRun: run,
     pathFilter,
+    getCurrentJobName: async (): Promise<string | null> => currentJobName,
     getCommit: buildHistory(commits),
-    findPassedRun: async (treeHashes: string[], sinceDate: Date): Promise<IWorkflowRun | null> => {
+    findPassedRun: async (treeHashes: string[], sinceDate: Date, _jobName: string): Promise<IWorkflowRun | null> => {
       searches.push({ treeHashes, sinceDate });
       return olderRuns.find((olderRun: IWorkflowRun): boolean => isEarlierPassedRun(olderRun, run, treeHashes)) ?? null;
     },
   });
-  return decision.passedRun;
 };
+
+const decide = async (commits: ITestCommit[], olderRuns: IWorkflowRun[], pathFilter: IPathFilter | null, run: IWorkflowRun = currentRun): Promise<IWorkflowRun | null> => (await makeDecision(commits, olderRuns, pathFilter, run)).passedRun;
 
 describe('decideSkip', () => {
   it('skips when the exact same files already passed', async () => {
@@ -130,8 +133,26 @@ describe('decideSkip', () => {
     expect(searches[0].sinceDate).toEqual(new Date(6 * HOUR_MS));
   });
 
-  it.each(['workflow_dispatch', 'schedule', 'merge_group'])('never skips %s runs', async (event: string) => {
-    expect(await decide([{ treeHash: 't0', changedFiles: [] }], [buildRun(1, 't0', 'success')], null, { ...currentRun, event })).toBeNull();
+  it('does not reuse a passed run from a different event', async () => {
+    const pushRun = buildRun(1, 't0', 'success', { event: 'push' });
+    expect(await decide([{ treeHash: 't0', changedFiles: [] }], [pushRun], null)).toBeNull();
+  });
+
+  it('allows push and pull_request runs to skip', async () => {
+    expect((await decide([{ treeHash: 't0', changedFiles: [] }], [buildRun(1, 't0', 'success')], null))?.id).toBe(1);
+    const pushRun = buildRun(1, 't0', 'success', { event: 'push' });
+    expect((await decide([{ treeHash: 't0', changedFiles: [] }], [pushRun], null, { ...currentRun, event: 'push' }))?.id).toBe(1);
+  });
+
+  it.each(['workflow_dispatch', 'schedule', 'merge_group', 'issues', 'issue_comment'])('%s runs are never skipped', async (event: string) => {
+    const decision = await makeDecision([{ treeHash: 't0', changedFiles: [] }], [buildRun(1, 't0', 'success')], null, { ...currentRun, event });
+    expect(decision).toEqual({ passedRun: null, reason: `${event} runs are never skipped` });
+    expect(searches).toEqual([]);
+  });
+
+  it('does not skip when the current job cannot be identified', async () => {
+    const decision = await makeDecision([{ treeHash: 't0', changedFiles: [] }], [buildRun(1, 't0', 'success')], null, currentRun, null);
+    expect(decision.passedRun).toBeNull();
     expect(searches).toEqual([]);
   });
 

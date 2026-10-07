@@ -15,6 +15,7 @@ interface IApiWorkflowRun {
   id: number;
   event: string;
   workflow_id: number;
+  run_attempt?: number;
   created_at: string;
   head_sha: string;
   status: string | null;
@@ -27,6 +28,7 @@ const buildWorkflowRun = (run: IApiWorkflowRun): IWorkflowRun => ({
   id: run.id,
   event: run.event,
   workflowId: run.workflow_id,
+  runAttempt: run.run_attempt ?? null,
   createdDate: new Date(run.created_at),
   headSha: run.head_sha,
   treeHash: run.head_commit?.tree_id ?? null,
@@ -40,22 +42,60 @@ export const getWorkflowRun = async (octokit: Octokit, owner: string, repo: stri
   return buildWorkflowRun(response.data);
 };
 
-// NOTE(krishan711): runs are listed newest first, so the search stops at the first passed run or once runs are older than the files being looked for
-export const findPassedRun = async (octokit: Octokit, owner: string, repo: string, currentRun: IWorkflowRun, treeHashes: string[], sinceDate: Date): Promise<IWorkflowRun | null> => {
-  let checkedRunCount = 0;
-  for await (const response of octokit.paginate.iterator(octokit.rest.actions.listWorkflowRuns, { owner, repo, workflow_id: currentRun.workflowId, per_page: RUNS_PER_PAGE, exclude_pull_requests: true })) {
-    const runs = response.data.map(buildWorkflowRun);
-    const passedRun = runs.find((run: IWorkflowRun): boolean => isEarlierPassedRun(run, currentRun, treeHashes));
-    if (passedRun) {
-      return passedRun;
-    }
-    checkedRunCount += runs.length;
-    const oldestRun = runs[runs.length - 1];
-    if (!oldestRun || oldestRun.createdDate < sinceDate || checkedRunCount >= MAX_RUNS_TO_CHECK) {
-      return null;
+export const getCurrentJobName = async (octokit: Octokit, owner: string, repo: string, currentRun: IWorkflowRun, runAttempt: number, runnerName: string | undefined): Promise<string | null> => {
+  if (!runnerName) {
+    return null;
+  }
+  for await (const response of octokit.paginate.iterator(octokit.rest.actions.listJobsForWorkflowRunAttempt, { owner, repo, run_id: currentRun.id, attempt_number: runAttempt, per_page: 100 })) {
+    const job = response.data.find((candidate) => candidate.runner_name === runnerName && candidate.status === 'in_progress');
+    if (job) {
+      return job.name;
     }
   }
   return null;
+};
+
+const hasPassedJob = async (octokit: Octokit, owner: string, repo: string, run: IWorkflowRun, jobName: string): Promise<boolean> => {
+  if (run.runAttempt === null) {
+    return false;
+  }
+  for await (const response of octokit.paginate.iterator(octokit.rest.actions.listJobsForWorkflowRunAttempt, { owner, repo, run_id: run.id, attempt_number: run.runAttempt, per_page: 100 })) {
+    if (response.data.some((job) => job.name === jobName && job.conclusion === 'success')) {
+      return true;
+    }
+  }
+  return false;
+};
+
+// NOTE(krishan711): runs are listed newest first, so the search stops at the first run whose matching job passed or once runs are older than the files being looked for
+export const findPassedRun = async (octokit: Octokit, owner: string, repo: string, currentRun: IWorkflowRun, treeHashes: string[], sinceDate: Date, jobName: string): Promise<IWorkflowRun | null> => {
+  const runPages = octokit.paginate.iterator(octokit.rest.actions.listWorkflowRuns, { owner, repo, workflow_id: currentRun.workflowId, per_page: RUNS_PER_PAGE, exclude_pull_requests: false })[Symbol.asyncIterator]();
+  const findInNextPage = async (checkedRunCount: number): Promise<IWorkflowRun | null> => {
+    const page = await runPages.next();
+    if (page.done) {
+      return null;
+    }
+    const runs = page.value.data.map(buildWorkflowRun);
+    const passedRun = await runs.reduce<Promise<IWorkflowRun | null>>(
+      (previousPassedRun, run) => previousPassedRun.then((foundRun: IWorkflowRun | null) => {
+        if (foundRun || !isEarlierPassedRun(run, currentRun, treeHashes)) {
+          return foundRun;
+        }
+        return hasPassedJob(octokit, owner, repo, run, jobName).then((jobPassed: boolean): IWorkflowRun | null => jobPassed ? run : null);
+      }),
+      Promise.resolve(null),
+    );
+    if (passedRun) {
+      return passedRun;
+    }
+    const newCheckedRunCount = checkedRunCount + runs.length;
+    const oldestRun = runs[runs.length - 1];
+    if (!oldestRun || oldestRun.createdDate < sinceDate || newCheckedRunCount >= MAX_RUNS_TO_CHECK) {
+      return null;
+    }
+    return findInNextPage(newCheckedRunCount);
+  };
+  return findInNextPage(0);
 };
 
 export const getCommit = async (octokit: Octokit, owner: string, repo: string, sha: string): Promise<ICommit> => {
