@@ -40,12 +40,27 @@ export const getWorkflowRun = async (octokit: Octokit, owner: string, repo: stri
   return buildWorkflowRun(response.data);
 };
 
-// NOTE(krishan711): runs are listed newest first, so the search stops at the first passed run or once runs are older than the files being looked for
-export const findPassedRun = async (octokit: Octokit, owner: string, repo: string, currentRun: IWorkflowRun, treeHashes: string[], sinceDate: Date): Promise<IWorkflowRun | null> => {
+// NOTE(krishan711): listing a run's jobs returns its latest attempt, which is the one its status and conclusion come from
+export const getCurrentJobName = async (octokit: Octokit, owner: string, repo: string, runId: number, runnerName: string | undefined): Promise<string | null> => {
+  if (!runnerName) {
+    return null;
+  }
+  const jobs = await octokit.paginate(octokit.rest.actions.listJobsForWorkflowRun, { owner, repo, run_id: runId, per_page: 100 });
+  return jobs.find((job): boolean => job.runner_name === runnerName && job.status === 'in_progress')?.name ?? null;
+};
+
+// NOTE(krishan711): runs are listed newest first, so the search stops at the first run where this job passed or once runs are older than the files being looked for
+export const findPassedRun = async (octokit: Octokit, owner: string, repo: string, currentRun: IWorkflowRun, treeHashes: string[], sinceDate: Date, jobName: string): Promise<IWorkflowRun | null> => {
   let checkedRunCount = 0;
   for await (const response of octokit.paginate.iterator(octokit.rest.actions.listWorkflowRuns, { owner, repo, workflow_id: currentRun.workflowId, per_page: RUNS_PER_PAGE, exclude_pull_requests: true })) {
     const runs = response.data.map(buildWorkflowRun);
-    const passedRun = runs.find((run: IWorkflowRun): boolean => isEarlierPassedRun(run, currentRun, treeHashes));
+    const matchingRuns = runs.filter((run: IWorkflowRun): boolean => isEarlierPassedRun(run, currentRun, treeHashes));
+    // NOTE(krishan711): a run succeeds even when this job was skipped by an `if:`, so the job itself must have passed
+    const hasJobPassed = await Promise.all(matchingRuns.map(async (run: IWorkflowRun): Promise<boolean> => {
+      const jobs = await octokit.paginate(octokit.rest.actions.listJobsForWorkflowRun, { owner, repo, run_id: run.id, per_page: 100 });
+      return jobs.some((job): boolean => job.name === jobName && job.conclusion === 'success');
+    }));
+    const passedRun = matchingRuns.find((_: IWorkflowRun, index: number): boolean => hasJobPassed[index]);
     if (passedRun) {
       return passedRun;
     }

@@ -1,5 +1,5 @@
 name: 'Skip If Passed'
-description: 'Skip the rest of a job when the files it checks already passed on an earlier commit'
+description: 'Skip a job on push or pull_request when the same job passed with the same files'
 branding:
   icon: 'fast-forward'
   color: 'green'
