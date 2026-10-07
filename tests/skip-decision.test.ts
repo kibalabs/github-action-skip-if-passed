@@ -1,15 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
 import { ICommit, IPathFilter, IWorkflowRun } from '../src/model';
-import { decideSkip, MAX_COMMITS_TO_CHECK } from '../src/skip-decision';
+import { decideSkip, isEarlierPassedRun, MAX_COMMITS_TO_CHECK } from '../src/skip-decision';
 
 const API_FILTER: IPathFilter = { type: 'paths', patterns: ['api/**'] };
+const HOUR_MS = 60 * 60 * 1000;
 
 const buildRun = (id: number, treeHash: string, conclusion: string | null, overrides: Partial<IWorkflowRun> = {}): IWorkflowRun => ({
   id,
   event: 'pull_request',
   workflowId: 1,
-  createdDate: new Date(id * 1000),
+  createdDate: new Date(id * HOUR_MS),
   headSha: `sha${id}`,
   treeHash,
   status: conclusion === null ? 'in_progress' : 'completed',
@@ -18,14 +19,22 @@ const buildRun = (id: number, treeHash: string, conclusion: string | null, overr
   ...overrides,
 });
 
+interface ITestCommit {
+  treeHash: string;
+  changedFiles: string[];
+  hasAllChangedFiles?: boolean;
+  committedHour?: number;
+}
+
 // NOTE(krishan711): commits are listed newest first, each one's parent is the next in the list
-const buildHistory = (commits: { treeHash: string; changedFiles: string[]; hasAllChangedFiles?: boolean }[]): ((sha: string) => Promise<ICommit>) => {
-  const commitMap = new Map(commits.map((commit, index): [string, ICommit] => [`c${index}`, {
+const buildHistory = (commits: ITestCommit[]): ((sha: string) => Promise<ICommit>) => {
+  const commitMap = new Map(commits.map((commit: ITestCommit, index: number): [string, ICommit] => [`c${index}`, {
     sha: `c${index}`,
     treeHash: commit.treeHash,
     parentSha: index + 1 < commits.length ? `c${index + 1}` : null,
     changedFiles: commit.changedFiles,
     hasAllChangedFiles: commit.hasAllChangedFiles ?? true,
+    committedDate: new Date((commit.committedHour ?? 5) * HOUR_MS),
   }]));
   return async (sha: string): Promise<ICommit> => {
     const commit = commitMap.get(sha);
@@ -37,80 +46,97 @@ const buildHistory = (commits: { treeHash: string; changedFiles: string[]; hasAl
 };
 
 const currentRun = buildRun(10, 't0', null, { headSha: 'c0' });
+const searches: { treeHashes: string[]; sinceDate: Date }[] = [];
+
+const decide = async (commits: ITestCommit[], olderRuns: IWorkflowRun[], pathFilter: IPathFilter | null, run: IWorkflowRun = currentRun): Promise<IWorkflowRun | null> => {
+  searches.length = 0;
+  const decision = await decideSkip({
+    currentRun: run,
+    pathFilter,
+    getCommit: buildHistory(commits),
+    findPassedRun: async (treeHashes: string[], sinceDate: Date): Promise<IWorkflowRun | null> => {
+      searches.push({ treeHashes, sinceDate });
+      return olderRuns.find((olderRun: IWorkflowRun): boolean => isEarlierPassedRun(olderRun, run, treeHashes)) ?? null;
+    },
+  });
+  return decision.passedRun;
+};
 
 describe('decideSkip', () => {
   it('skips when the exact same files already passed', async () => {
-    const decision = await decideSkip({ currentRun, olderRuns: [buildRun(1, 't0', 'success')], pathFilter: null, getCommit: buildHistory([]) });
-    expect(decision.passedRun?.id).toBe(1);
+    expect((await decide([{ treeHash: 't0', changedFiles: [] }], [buildRun(1, 't0', 'success')], null))?.id).toBe(1);
   });
 
   it.each(['failure', 'cancelled', 'timed_out', 'skipped'])('does not count a %s run on the same files', async (conclusion: string) => {
-    const decision = await decideSkip({ currentRun, olderRuns: [buildRun(1, 't0', conclusion)], pathFilter: null, getCommit: buildHistory([]) });
-    expect(decision.passedRun).toBeNull();
+    expect(await decide([{ treeHash: 't0', changedFiles: [] }], [buildRun(1, 't0', conclusion)], null)).toBeNull();
   });
 
   it('does not count a run that is still going', async () => {
-    const decision = await decideSkip({ currentRun, olderRuns: [buildRun(1, 't0', null)], pathFilter: null, getCommit: buildHistory([]) });
-    expect(decision.passedRun).toBeNull();
+    expect(await decide([{ treeHash: 't0', changedFiles: [] }], [buildRun(1, 't0', null)], null)).toBeNull();
+  });
+
+  it('does not count runs created after the current one', async () => {
+    expect(await decide([{ treeHash: 't0', changedFiles: [] }], [buildRun(11, 't0', 'success')], null)).toBeNull();
+  });
+
+  it('only looks at the current files without a paths filter', async () => {
+    const commits = [{ treeHash: 't0', changedFiles: ['README.md'] }, { treeHash: 't1', changedFiles: ['api/app.py'] }];
+    expect(await decide(commits, [buildRun(1, 't1', 'success')], null)).toBeNull();
+    expect(searches[0].treeHashes).toEqual(['t0']);
   });
 
   it('skips when no commit since the last passing run touched the checked paths', async () => {
-    const getCommit = buildHistory([
+    const commits = [
       { treeHash: 't0', changedFiles: ['app/main.ts'] },
       { treeHash: 't1', changedFiles: ['README.md'] },
       { treeHash: 't2', changedFiles: ['api/app.py'] },
-    ]);
-    const decision = await decideSkip({ currentRun, olderRuns: [buildRun(2, 't2', 'success')], pathFilter: API_FILTER, getCommit });
-    expect(decision.passedRun?.id).toBe(2);
+    ];
+    expect((await decide(commits, [buildRun(2, 't2', 'success')], API_FILTER))?.id).toBe(2);
+    expect(searches[0].treeHashes).toEqual(['t0', 't1', 't2']);
   });
 
   it('runs when a commit since the last passing run touched the checked paths', async () => {
-    const getCommit = buildHistory([
+    const commits = [
       { treeHash: 't0', changedFiles: ['app/main.ts'] },
       { treeHash: 't1', changedFiles: ['api/app.py'] },
       { treeHash: 't2', changedFiles: ['api/app.py'] },
-    ]);
-    const decision = await decideSkip({ currentRun, olderRuns: [buildRun(2, 't2', 'success')], pathFilter: API_FILTER, getCommit });
-    expect(decision.passedRun).toBeNull();
-    expect(decision.reason).toContain('c1');
+    ];
+    expect(await decide(commits, [buildRun(2, 't2', 'success')], API_FILTER)).toBeNull();
+    expect(searches[0].treeHashes).toEqual(['t0', 't1']);
   });
 
   it('runs when the last run on the checked paths failed', async () => {
-    const getCommit = buildHistory([
-      { treeHash: 't0', changedFiles: ['app/main.ts'] },
-      { treeHash: 't1', changedFiles: ['api/app.py'] },
-    ]);
-    const decision = await decideSkip({ currentRun, olderRuns: [buildRun(1, 't1', 'failure')], pathFilter: API_FILTER, getCommit });
-    expect(decision.passedRun).toBeNull();
+    const commits = [{ treeHash: 't0', changedFiles: ['app/main.ts'] }, { treeHash: 't1', changedFiles: ['api/app.py'] }];
+    expect(await decide(commits, [buildRun(1, 't1', 'failure')], API_FILTER)).toBeNull();
   });
 
   it('runs when the current commit itself touched the checked paths', async () => {
-    const getCommit = buildHistory([
-      { treeHash: 't0', changedFiles: ['api/app.py'] },
-      { treeHash: 't1', changedFiles: ['api/app.py'] },
-    ]);
-    const decision = await decideSkip({ currentRun, olderRuns: [buildRun(1, 't1', 'success')], pathFilter: API_FILTER, getCommit });
-    expect(decision.passedRun).toBeNull();
+    const commits = [{ treeHash: 't0', changedFiles: ['api/app.py'] }, { treeHash: 't1', changedFiles: ['api/app.py'] }];
+    expect(await decide(commits, [buildRun(1, 't1', 'success')], API_FILTER)).toBeNull();
+    expect(searches[0].treeHashes).toEqual(['t0']);
   });
 
   it('treats a commit with too many changed files to list as touching everything', async () => {
-    const getCommit = buildHistory([
-      { treeHash: 't0', changedFiles: ['app/main.ts'], hasAllChangedFiles: false },
-      { treeHash: 't1', changedFiles: ['api/app.py'] },
-    ]);
-    const decision = await decideSkip({ currentRun, olderRuns: [buildRun(1, 't1', 'success')], pathFilter: API_FILTER, getCommit });
-    expect(decision.passedRun).toBeNull();
+    const commits = [{ treeHash: 't0', changedFiles: ['app/main.ts'], hasAllChangedFiles: false }, { treeHash: 't1', changedFiles: ['api/app.py'] }];
+    expect(await decide(commits, [buildRun(1, 't1', 'success')], API_FILTER)).toBeNull();
+  });
+
+  it('searches runs from an hour before the oldest commit it would accept', async () => {
+    const commits = [
+      { treeHash: 't0', changedFiles: ['README.md'], committedHour: 9 },
+      { treeHash: 't1', changedFiles: ['api/app.py'], committedHour: 7 },
+    ];
+    await decide(commits, [], API_FILTER);
+    expect(searches[0].sinceDate).toEqual(new Date(6 * HOUR_MS));
   });
 
   it.each(['workflow_dispatch', 'schedule', 'merge_group'])('never skips %s runs', async (event: string) => {
-    const decision = await decideSkip({ currentRun: { ...currentRun, event }, olderRuns: [buildRun(1, 't0', 'success')], pathFilter: null, getCommit: buildHistory([]) });
-    expect(decision.passedRun).toBeNull();
+    expect(await decide([{ treeHash: 't0', changedFiles: [] }], [buildRun(1, 't0', 'success')], null, { ...currentRun, event })).toBeNull();
+    expect(searches).toEqual([]);
   });
 
   it('only looks back a limited number of commits', async () => {
-    const commits = Array.from({ length: MAX_COMMITS_TO_CHECK + 5 }, (_, index) => ({ treeHash: `t${index}`, changedFiles: ['README.md'] }));
-    const lastTree = `t${commits.length - 1}`;
-    const decision = await decideSkip({ currentRun, olderRuns: [buildRun(1, lastTree, 'success')], pathFilter: API_FILTER, getCommit: buildHistory(commits) });
-    expect(decision.passedRun).toBeNull();
+    const commits = Array.from({ length: MAX_COMMITS_TO_CHECK + 5 }, (_, index: number): ITestCommit => ({ treeHash: `t${index}`, changedFiles: ['README.md'] }));
+    expect(await decide(commits, [buildRun(1, `t${commits.length - 1}`, 'success')], API_FILTER)).toBeNull();
   });
 });

@@ -1,10 +1,13 @@
 import { GitHub } from '@actions/github/lib/utils';
 
 import { ICommit, IWorkflowRun } from './model';
+import { isEarlierPassedRun } from './skip-decision';
 
 export type Octokit = InstanceType<typeof GitHub>;
 
 const MAX_RUNS_TO_CHECK = 500;
+// NOTE(krishan711): small pages because a run listing is large (about 15KB per run), most searches end on the first page
+const RUNS_PER_PAGE = 30;
 // NOTE(krishan711): the commits API lists at most this many changed files for a single commit
 const MAX_LISTED_COMMIT_FILES = 300;
 
@@ -37,15 +40,22 @@ export const getWorkflowRun = async (octokit: Octokit, owner: string, repo: stri
   return buildWorkflowRun(response.data);
 };
 
-export const listOlderWorkflowRuns = async (octokit: Octokit, owner: string, repo: string, currentRun: IWorkflowRun): Promise<IWorkflowRun[]> => {
-  const runs: IWorkflowRun[] = [];
-  for await (const response of octokit.paginate.iterator(octokit.rest.actions.listWorkflowRuns, { owner, repo, workflow_id: currentRun.workflowId, per_page: 100 })) {
-    runs.push(...response.data.map(buildWorkflowRun));
-    if (runs.length >= MAX_RUNS_TO_CHECK) {
-      break;
+// NOTE(krishan711): runs are listed newest first, so the search stops at the first passed run or once runs are older than the files being looked for
+export const findPassedRun = async (octokit: Octokit, owner: string, repo: string, currentRun: IWorkflowRun, treeHashes: string[], sinceDate: Date): Promise<IWorkflowRun | null> => {
+  let checkedRunCount = 0;
+  for await (const response of octokit.paginate.iterator(octokit.rest.actions.listWorkflowRuns, { owner, repo, workflow_id: currentRun.workflowId, per_page: RUNS_PER_PAGE, exclude_pull_requests: true })) {
+    const runs = response.data.map(buildWorkflowRun);
+    const passedRun = runs.find((run: IWorkflowRun): boolean => isEarlierPassedRun(run, currentRun, treeHashes));
+    if (passedRun) {
+      return passedRun;
+    }
+    checkedRunCount += runs.length;
+    const oldestRun = runs[runs.length - 1];
+    if (!oldestRun || oldestRun.createdDate < sinceDate || checkedRunCount >= MAX_RUNS_TO_CHECK) {
+      return null;
     }
   }
-  return runs.filter((run: IWorkflowRun): boolean => run.id !== currentRun.id && run.treeHash !== null && run.createdDate < currentRun.createdDate);
+  return null;
 };
 
 export const getCommit = async (octokit: Octokit, owner: string, repo: string, sha: string): Promise<ICommit> => {
@@ -57,6 +67,7 @@ export const getCommit = async (octokit: Octokit, owner: string, repo: string, s
     parentSha: response.data.parents[0]?.sha ?? null,
     changedFiles: files.map((file): string => file.filename),
     hasAllChangedFiles: files.length < MAX_LISTED_COMMIT_FILES,
+    committedDate: new Date(response.data.commit.committer?.date ?? response.data.commit.author?.date ?? 0),
   };
 };
 

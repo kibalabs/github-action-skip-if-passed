@@ -2,7 +2,7 @@ import { exportVariable, getInput, getMultilineInput, summary as jobSummary, inf
 import { getOctokit, context as githubContext } from '@actions/github';
 
 import { copyCheckRuns } from './copy-checks';
-import { getCommit, getFileContent, getWorkflowRun, listOlderWorkflowRuns, Octokit } from './github-api';
+import { findPassedRun, getCommit, getFileContent, getWorkflowRun, Octokit } from './github-api';
 import { IPathFilter, SKIP_ENVIRONMENT_VARIABLE } from './model';
 import { readTriggerPathFilter } from './path-filter';
 import { decideSkip } from './skip-decision';
@@ -27,12 +27,11 @@ const run = async (): Promise<void> => {
     const pathFilter = await getPathFilter(octokit, owner, repo);
     logInfo(pathFilter ? `Checking ${pathFilter.type}: ${pathFilter.patterns.join(', ')}` : 'No paths filter, only skipping when the exact same files passed');
     const currentRun = await getWorkflowRun(octokit, owner, repo, githubContext.runId);
-    const olderRuns = await listOlderWorkflowRuns(octokit, owner, repo, currentRun);
     const decision = await decideSkip({
       currentRun,
-      olderRuns,
       pathFilter,
       getCommit: (sha: string) => getCommit(octokit, owner, repo, sha),
+      findPassedRun: (treeHashes: string[], sinceDate: Date) => findPassedRun(octokit, owner, repo, currentRun, treeHashes, sinceDate),
     });
     setOutput('reason', decision.reason);
     if (!decision.passedRun) {

@@ -20,6 +20,7 @@ export interface ICommit {
   parentSha: string | null;
   changedFiles: string[];
   hasAllChangedFiles: boolean;
+  committedDate: Date;
 }
 
 export type PathFilterType = 'paths' | 'paths-ignore';
