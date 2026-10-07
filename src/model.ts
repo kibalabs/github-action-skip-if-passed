@@ -6,7 +6,6 @@ export interface IWorkflowRun {
   id: number;
   event: string;
   workflowId: number;
-  runAttempt: number | null;
   createdDate: Date;
   headSha: string;
   treeHash: string | null;

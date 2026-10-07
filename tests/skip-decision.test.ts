@@ -10,7 +10,6 @@ const buildRun = (id: number, treeHash: string, conclusion: string | null, overr
   id,
   event: 'pull_request',
   workflowId: 1,
-  runAttempt: 1,
   createdDate: new Date(id * HOUR_MS),
   headSha: `sha${id}`,
   treeHash,

@@ -30,7 +30,7 @@ const run = async (): Promise<void> => {
     const decision = await decideSkip({
       currentRun,
       pathFilter,
-      getCurrentJobName: () => getCurrentJobName(octokit, owner, repo, currentRun, githubContext.runAttempt, process.env.RUNNER_NAME),
+      getCurrentJobName: () => getCurrentJobName(octokit, owner, repo, currentRun.id, process.env.RUNNER_NAME),
       getCommit: (sha: string) => getCommit(octokit, owner, repo, sha),
       findPassedRun: (treeHashes: string[], sinceDate: Date, jobName: string) => findPassedRun(octokit, owner, repo, currentRun, treeHashes, sinceDate, jobName),
     });
